@@ -1,0 +1,14 @@
+{
+  "id": "chrisyuspithk/biohub-cell-tracking-cellpose",
+  "title": "Biohub Cell Tracking - Cellpose Pipeline",
+  "code_file": "cellpose_tracking.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": []
+}

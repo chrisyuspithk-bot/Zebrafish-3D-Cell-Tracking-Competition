@@ -1,0 +1,14 @@
+{
+  "id": "chrisyuspithk/biohub-p90-baseline",
+  "title": "Biohub P90 Baseline",
+  "code_file": "p90_baseline.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": []
+}
