@@ -184,6 +184,61 @@ def detect_cells_multiscale(
     return merged.astype(np.int32)
 
 
+def detect_cells_cellpose(
+    volume_3d: np.ndarray,
+    model=None,
+    diameter: float = 25.0,
+    gpu: bool = False,
+    min_size: int = 30,
+) -> np.ndarray:
+    """
+    Detect cells using Cellpose instance segmentation on MIP projection.
+
+    Parameters
+    ----------
+    volume_3d : np.ndarray, shape (Z, Y, X), float32
+        3D frame.
+    model : CellposeModel or None
+        Pre-loaded Cellpose model. Loads 'nuclei' model if None.
+    diameter : float
+        Expected cell diameter in pixels (~25 for zebrafish nuclei).
+    gpu : bool
+        Use GPU for inference.
+    min_size : int
+        Minimum mask area to keep (filters noise).
+
+    Returns
+    -------
+    centroids : np.ndarray, shape (N, 3), float32
+        (z, y, x) centroids.
+    """
+    if model is None:
+        from cellpose import models
+        model = models.CellposeModel(gpu=gpu, model_type='nuclei')
+
+    mip = volume_3d.max(axis=0)
+    if mip.max() <= 1:
+        return np.empty((0, 3), dtype=np.float32)
+
+    # Normalize to 0-1 for Cellpose
+    mip_norm = (mip - mip.min()) / (mip.max() - mip.min() + 1e-8)
+    masks, _, _ = model.eval(mip_norm, diameter=diameter, channels=[0, 0])
+
+    centroids = []
+    for label in np.unique(masks):
+        if label == 0:
+            continue
+        region = masks == label
+        if region.sum() < min_size:
+            continue
+        ys, xs = np.where(region)
+        z_profile = volume_3d[:, region].mean(axis=1)
+        z_center = float(np.argmax(z_profile))
+        centroids.append((z_center, ys.mean(), xs.mean()))
+
+    return np.array(centroids, dtype=np.float32) if centroids else np.empty((0, 3), dtype=np.float32)
+
+
 def _deduplicate(coords: np.ndarray, min_dist: float) -> np.ndarray:
     keep = np.ones(len(coords), dtype=bool)
     for i in range(len(coords)):
@@ -503,7 +558,7 @@ def process_dataset(
     """
     Process a single .zarr dataset through the full pipeline.
 
-    detection_method: "cc" (connected components, fast) or "dog" (DoG peaks, dense cells)
+    detection_method: "cc" (connected components), "dog" (DoG peaks), "multiscale", or "cellpose"
     """
     dataset_name = os.path.basename(zarr_path).replace(".zarr", "")
 
@@ -532,6 +587,17 @@ def process_dataset(
             "threshold_rel": detection_params.get("threshold_rel", 0.02),
             "min_distance": detection_params.get("min_distance", 5),
             "downsample": detection_params.get("downsample", 1),
+        }
+    elif detection_method == "cellpose":
+        from cellpose import models
+        gpu = detection_params.get("gpu", False)
+        cp_model = models.CellposeModel(gpu=gpu, model_type='nuclei')
+        detect_fn = detect_cells_cellpose
+        det_params = {
+            "model": cp_model,
+            "diameter": detection_params.get("diameter", 25.0),
+            "gpu": gpu,
+            "min_size": detection_params.get("min_size", 30),
         }
     else:
         raise ValueError(f"Unknown detection_method: {detection_method}")
@@ -591,6 +657,9 @@ def run_pipeline(
     percentile: float = 90.0,
     downsample: int = 4,
     min_distance: int = 5,
+    diameter: float = 25.0,
+    min_size: int = 30,
+    gpu: bool = False,
     max_move: float = 15.0,
     division_threshold: float = 15.0,
     motion_weight: float = 0.0,
@@ -607,12 +676,15 @@ def run_pipeline(
     Args:
         input_dir: Directory containing .zarr test datasets
         output_path: Path for output submission.csv
-        detection_method: "cc" (connected components, fast) or "dog" (DoG peaks) or "multiscale"
+        detection_method: "cc", "dog", "multiscale", or "cellpose"
         sigma: Gaussian sigma for DoG detection (voxels)
         threshold_rel: Detection threshold for DoG detection
         percentile: Brightness percentile for cc detection (p90 = top 10%)
         downsample: Downsampling factor (4 = 64x fewer voxels, recommended for cc)
         min_distance: Minimum distance between cells (voxels)
+        diameter: Expected cell diameter for Cellpose (pixels)
+        min_size: Minimum mask area for Cellpose detection
+        gpu: Use GPU for Cellpose inference
         max_move: Maximum cell movement between frames (µm)
         division_threshold: Max distance for division detection (µm)
         motion_weight: Weight of motion-compensated distance [0-1]
@@ -637,8 +709,11 @@ def run_pipeline(
         sys.exit(1)
 
     print(f"Found {len(zarr_files)} datasets")
-    print(f"Detection: method={detection_method}, downsample={downsample}, "
-          f"percentile={percentile}, sigma={sigma}, thresh_rel={threshold_rel}")
+    if detection_method == "cellpose":
+        print(f"Detection: method=cellpose, diameter={diameter}, min_size={min_size}, gpu={gpu}")
+    else:
+        print(f"Detection: method={detection_method}, downsample={downsample}, "
+              f"percentile={percentile}, sigma={sigma}, thresh_rel={threshold_rel}")
     print(f"Tracking: max_move={max_move}, div_thresh={division_threshold}, "
           f"motion_weight={motion_weight}, frame_buffer={frame_buffer}")
 
@@ -648,6 +723,9 @@ def run_pipeline(
         "percentile": percentile,
         "downsample": downsample,
         "min_distance": min_distance,
+        "diameter": diameter,
+        "min_size": min_size,
+        "gpu": gpu,
     }
     tracking_params = {
         "max_move": max_move,
@@ -710,8 +788,8 @@ if __name__ == "__main__":
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output", type=str, default="submission.csv")
     parser.add_argument("--method", type=str, default="cc",
-                        choices=["cc", "dog", "multiscale"],
-                        help="Detection method: cc (connected components), dog (DoG peaks), multiscale")
+                        choices=["cc", "dog", "multiscale", "cellpose"],
+                        help="Detection method: cc, dog, multiscale, cellpose")
     parser.add_argument("--sigma", type=float, default=3.0)
     parser.add_argument("--threshold-rel", type=float, default=0.02)
     parser.add_argument("--percentile", type=float, default=90.0,
@@ -719,6 +797,12 @@ if __name__ == "__main__":
     parser.add_argument("--downsample", type=int, default=4,
                         help="Downsampling factor (4 recommended for cc)")
     parser.add_argument("--min-distance", type=int, default=5)
+    parser.add_argument("--diameter", type=float, default=25.0,
+                        help="Cell diameter in pixels for Cellpose")
+    parser.add_argument("--min-size", type=int, default=30,
+                        help="Minimum mask area for Cellpose")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Use GPU for Cellpose inference")
     parser.add_argument("--max-move", type=float, default=15.0)
     parser.add_argument("--division-threshold", type=float, default=15.0)
     parser.add_argument("--motion-weight", type=float, default=0.0)
@@ -736,6 +820,9 @@ if __name__ == "__main__":
         percentile=args.percentile,
         downsample=args.downsample,
         min_distance=args.min_distance,
+        diameter=args.diameter,
+        min_size=args.min_size,
+        gpu=args.gpu,
         max_move=args.max_move,
         division_threshold=args.division_threshold,
         motion_weight=args.motion_weight,
