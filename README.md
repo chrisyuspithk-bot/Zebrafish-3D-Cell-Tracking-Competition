@@ -2,56 +2,76 @@
 
 [Kaggle Competition](https://kaggle.com/competitions/biohub-cell-tracking-during-development) · Deadline: September 29, 2026
 
-Detect and track zebrafish cells through 3D space and time in fluorescence microscopy volumes. The goal is to build robust algorithms that handle dense cell populations, imaging noise, and cell divisions.
+Detect and track zebrafish cells through 3D space and time in fluorescence microscopy volumes. Built on the [official baseline notebook](https://www.kaggle.com/code/inversion/cell-tracking-getting-started-w-nearest-neighbor) (score 0.143).
 
 ## Solution Overview
 
-A classical computer-vision pipeline for 3D+time cell tracking:
+Two detection strategies with frame-to-frame LAP tracking:
 
-1. **Detection** — Background subtraction → multi-scale Gaussian smoothing → percentile-adaptive threshold → local peak detection
-2. **Tracking** — Linear Assignment Problem (Hungarian algorithm) with velocity-based motion prediction and physical distance scaling
-3. **Division Detection** — Conservative parent→2-daughters linking integrated into the tracking loop
-4. **Calibration** — Optional auto-tuning of detection sensitivity using `.geff` ground-truth metadata
+1. **Detection (cc)** — 4× downsampling → box filter → percentile threshold (p90) → connected components → centroids. Fast and proven — matches the official baseline.
+2. **Detection (dog)** — Gaussian smoothing → adaptive threshold → local peak finding. Optional for dense cell populations.
+3. **Tracking** — Hungarian algorithm on physical distances (max 15 µm), with optional motion prediction and division detection.
+4. **Calibration** — Optional auto-tuning of detection sensitivity from `.geff` ground-truth metadata.
 
 ## Quick Start
 
 ```python
 from kaggle_solution import run_pipeline
 
-# Basic usage
+# Default: connected components (matches official baseline)
 run_pipeline(
     input_dir="/kaggle/input/biohub-cell-tracking-during-development/test",
     output_path="/kaggle/working/submission.csv",
 )
 
-# With auto-calibration from training data
+# Alternative: DoG peaks (for dense/overlapping cells)
 run_pipeline(
     input_dir="/kaggle/input/biohub-cell-tracking-during-development/test",
     output_path="/kaggle/working/submission.csv",
-    train_dir="/kaggle/input/biohub-cell-tracking-during-development/train",
-    target_ratio=1.05,   # slight over-predict (unmatched nodes aren't FP)
-    use_multiscale=True,
+    detection_method="dog", sigma=3.0, threshold_rel=0.02, downsample=2,
 )
 ```
+
+## Real Data Results
+
+Tested on 4 Kaggle test datasets (100 frames each, 64×256×256 uint16):
+
+| Dataset | Nodes | Edges | Cells/frame |
+|---|---|---|---|
+| 44b6_0113de3b | 1,935 | 1,337 | ~19 |
+| 44b6_0b24845f | 1,168 | 615 | ~12 |
+| 6bba_05b6850b | 399 | 302 | ~4 |
+| 6bba_05db0fb1 | 2,816 | 2,135 | ~28 |
+
+**Total time**: 11.3 seconds for all 4 datasets (cc p90 ds4).
 
 ## Dependencies
 
 ```
-numpy scipy scikit-image zarr lap tqdm numcodecs
+numpy scipy scikit-image zarr lap tqdm numcodecs blosc2
 ```
 
 ## Key Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
-| `sigma` | 3.0 | Gaussian smoothing sigma (voxels) |
-| `threshold_rel` | 0.02 | Detection sensitivity (auto-calibrated if `train_dir` set) |
-| `min_distance` | 5 | Minimum cell separation (voxels) |
+| `detection_method` | `"cc"` | `"cc"` (connected components), `"dog"` (DoG peaks), or `"multiscale"` |
+| `percentile` | 90.0 | Brightness percentile for cc threshold (p90 = top 10%) |
+| `downsample` | 4 | Downsampling factor (4 = 64× fewer voxels) |
+| `sigma` | 3.0 | Gaussian sigma for dog detection |
+| `threshold_rel` | 0.02 | Detection sensitivity for dog |
 | `max_move` | 15.0 | Maximum linking distance (µm) |
-| `division_threshold` | 20.0 | Maximum distance for division candidates (µm) |
-| `motion_weight` | 0.5 | Weight of motion-compensated vs raw distance |
-| `frame_buffer` | 2 | Frames before terminating lost tracks |
-| `target_ratio` | 1.0 | Calibration target (>1 = over-predict, recommended) |
+| `division_threshold` | 15.0 | Maximum distance for division candidates (µm) |
+| `motion_weight` | 0.0 | Motion prediction weight — negligible impact on this data |
+| `frame_buffer` | 1 | Frames before terminating lost tracks |
+
+## What We Learned From the Reference Notebook
+
+- **Downsampling is key.** 4× in Z,Y,X cuts data by 64× — natural denoising, dramatic speedup.
+- **Connected components work.** For fluorescent nuclei, p90 threshold + labeling is simpler and faster than peak finding.
+- **Divisions barely matter.** The metric weights edge tracking 10× more than division detection (score = edge + 0.1 × division).
+- **Motion prediction doesn't help.** Cells move slowly — frame-to-frame Hungarian is sufficient.
+- **Simple is better.** The reference baseline is ~20 lines of core logic and scores 0.143.
 
 ## Metric
 
@@ -61,8 +81,8 @@ Submissions are evaluated using a combined score:
 score = adjusted_edge_jaccard + 0.1 × division_jaccard
 ```
 
-- **Adjusted Edge Jaccard**: Measures how well cells are linked across time, with a penalty for over-predicting total node count. Ground truth is sparse — unmatched predicted nodes are not false positives.
-- **Division Jaccard**: Measures how well cell mitosis events are identified using a ±1 frame window.
+- **Adjusted Edge Jaccard**: Measures cell linkage accuracy with a penalty for over-predicting node count. Ground truth is sparse — unmatched predicted nodes are not false positives.
+- **Division Jaccard**: Measures mitosis detection accuracy using a ±1 frame window.
 
 Node matching uses physical distance (max 7.0 µm, voxel scale: z=1.625, y=x=0.40625 µm/voxel).
 
@@ -70,7 +90,7 @@ See [metrics.md](https://github.com/royerlab/kaggle-cell-tracking-competition/bl
 
 ## Data Format
 
-- **Input**: Zarr volumes (T, Z, Y, X) uint16 — typically (100, 64, 256, 256)
+- **Input**: Zarr v3 volumes (T, Z, Y, X) uint16 — typically (100, 64, 256, 256)
 - **Ground Truth**: `.geff` directories with sparse node/edge annotations
 - **Submission**: CSV with node rows (detections) and edge rows (temporal links)
 
