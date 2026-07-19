@@ -37,9 +37,68 @@ from tqdm import tqdm
 # Detection
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _estimate_background(volume: np.ndarray, sigma_bg: float = 10.0) -> np.ndarray:
-    """Estimate background using heavy Gaussian smoothing."""
-    return gaussian_filter(volume.astype(np.float32), sigma=sigma_bg)
+def detect_cells_cc(
+    volume: np.ndarray,
+    percentile: float = 90.0,
+    filter_size: int = 3,
+    downsample: int = 4,
+) -> np.ndarray:
+    """
+    Detect cells via percentile threshold + connected components.
+
+    This is the approach from the official getting-started notebook.
+    Downsamples, applies a uniform (box) filter, thresholds at a
+    brightness percentile, labels connected components, and returns
+    the centroid of each component.
+
+    Simple, fast, and effective for well-separated fluorescent nuclei.
+
+    Args:
+        volume: 3D array (Z, Y, X), typically uint16
+        percentile: Brightness percentile for threshold (0-100).
+                    p90 keeps top 10% brightest pixels.
+        filter_size: Size of uniform (box) filter kernel
+        downsample: Downsampling factor in Z, Y, X (1 = no downsampling)
+
+    Returns:
+        Array of shape (N, 3) with (z, y, x) integer voxel coordinates
+    """
+    from scipy.ndimage import uniform_filter, label as ndlabel
+
+    vol = volume.astype(np.float32)
+
+    # Downsample
+    if downsample > 1:
+        ds = downsample
+        # Crop to multiple of downsample for clean slicing
+        Z, Y, X = vol.shape
+        z_crop = (Z // ds) * ds
+        y_crop = (Y // ds) * ds
+        x_crop = (X // ds) * ds
+        vol = vol[:z_crop, :y_crop, :x_crop].reshape(
+            z_crop // ds, ds, y_crop // ds, ds, x_crop // ds, ds
+        ).mean(axis=(1, 3, 5))
+
+    # Box filter
+    smoothed = uniform_filter(vol, size=filter_size)
+
+    # Percentile threshold
+    threshold = np.percentile(smoothed, percentile)
+    binary = smoothed > threshold
+
+    # Connected components
+    labeled, n_features = ndlabel(binary)
+
+    if n_features == 0:
+        return np.zeros((0, 3), dtype=np.int32)
+
+    # Compute centroids
+    centroids = np.zeros((n_features, 3), dtype=np.float32)
+    for comp_id in range(1, n_features + 1):
+        coords = np.argwhere(labeled == comp_id)
+        centroids[comp_id - 1] = coords.mean(axis=0) * downsample
+
+    return np.round(centroids).astype(np.int32)
 
 
 def detect_cells_3d(
@@ -47,25 +106,36 @@ def detect_cells_3d(
     sigma: float = 3.0,
     threshold_rel: float = 0.02,
     min_distance: int = 5,
-    subtract_bg: bool = True,
+    downsample: int = 1,
 ) -> np.ndarray:
     """
-    Detect cells in a 3D volume.
+    Detect cells via Gaussian smoothing + local peak finding.
 
-    Optionally subtracts estimated background, smooths with Gaussian,
-    then finds local maxima above an adaptive threshold.
+    Better for dense populations where cells overlap in brightness.
 
-    Returns (N, 3) array of (z, y, x) integer voxel coordinates.
+    Args:
+        volume: 3D array (Z, Y, X), typically uint16
+        sigma: Gaussian sigma for smoothing
+        threshold_rel: Threshold as fraction of (peak - background) intensity
+        min_distance: Minimum separation between detections (voxels)
+        downsample: Downsampling factor (1 = no downsampling)
+
+    Returns:
+        Array of shape (N, 3) with (z, y, x) integer voxel coordinates
     """
     vol = volume.astype(np.float32)
 
-    if subtract_bg:
-        bg_est = _estimate_background(vol)
-        vol = vol - bg_est
-        vol = np.maximum(vol, 0)
+    if downsample > 1:
+        ds = downsample
+        Z, Y, X = vol.shape
+        z_crop = (Z // ds) * ds
+        y_crop = (Y // ds) * ds
+        x_crop = (X // ds) * ds
+        vol = vol[:z_crop, :y_crop, :x_crop].reshape(
+            z_crop // ds, ds, y_crop // ds, ds, x_crop // ds, ds
+        ).mean(axis=(1, 3, 5))
 
     smoothed = gaussian_filter(vol, sigma=sigma)
-
     bg = np.percentile(smoothed, 50)
     peak = np.percentile(smoothed, 99.9)
     abs_thresh = bg + threshold_rel * (peak - bg)
@@ -73,13 +143,19 @@ def detect_cells_3d(
     if abs_thresh <= bg or peak <= bg:
         return np.zeros((0, 3), dtype=np.int32)
 
+    # Scale min_distance for downsampled space
+    md = max(2, min_distance // downsample) if downsample > 1 else min_distance
+
     coords = peak_local_max(
-        smoothed, min_distance=min_distance,
+        smoothed, min_distance=md,
         threshold_abs=abs_thresh, exclude_border=2,
     )
     if len(coords) == 0:
         return np.zeros((0, 3), dtype=np.int32)
-    return coords.astype(np.int32)
+
+    # Scale coordinates back to original resolution
+    result = coords.astype(np.float32) * downsample
+    return np.round(result).astype(np.int32)
 
 
 def detect_cells_multiscale(
@@ -87,20 +163,15 @@ def detect_cells_multiscale(
     sigmas: tuple = (2.5, 3.5, 5.0),
     threshold_rel: float = 0.02,
     min_distance: int = 5,
-    subtract_bg: bool = True,
+    downsample: int = 1,
 ) -> np.ndarray:
-    """Multi-scale detection: combines results from multiple smoothing scales."""
-    vol = volume.astype(np.float32)
-    if subtract_bg:
-        bg_est = _estimate_background(vol)
-        vol = np.maximum(vol - bg_est, 0)
-
+    """Multi-scale DoG detection: combines results from multiple smoothing scales."""
     all_coords = []
     for sigma in sigmas:
-        coords = detect_cells_3d(vol, sigma=sigma,
-                                 threshold_rel=threshold_rel,
-                                 min_distance=min_distance,
-                                 subtract_bg=False)  # bg already subtracted
+        coords = detect_cells_3d(
+            volume, sigma=sigma, threshold_rel=threshold_rel,
+            min_distance=min_distance, downsample=downsample,
+        )
         if len(coords) > 0:
             all_coords.append(coords)
 
@@ -427,23 +498,43 @@ def process_dataset(
     zarr_path: str,
     detection_params: dict,
     tracking_params: dict,
-    use_multiscale: bool = True,
+    detection_method: str = "cc",
 ) -> dict:
-    """Process a single .zarr dataset through the full pipeline."""
+    """
+    Process a single .zarr dataset through the full pipeline.
+
+    detection_method: "cc" (connected components, fast) or "dog" (DoG peaks, dense cells)
+    """
     dataset_name = os.path.basename(zarr_path).replace(".zarr", "")
 
     volume = load_volume(zarr_path)
     T = volume.shape[0]
 
-    if use_multiscale:
+    # Select detection function and params
+    if detection_method == "cc":
+        detect_fn = detect_cells_cc
+        det_params = {
+            "percentile": detection_params.get("percentile", 90),
+            "filter_size": detection_params.get("filter_size", 3),
+            "downsample": detection_params.get("downsample", 4),
+        }
+    elif detection_method == "dog":
+        detect_fn = detect_cells_3d
+        det_params = {
+            "sigma": detection_params.get("sigma", 3.0),
+            "threshold_rel": detection_params.get("threshold_rel", 0.02),
+            "min_distance": detection_params.get("min_distance", 5),
+            "downsample": detection_params.get("downsample", 1),
+        }
+    elif detection_method == "multiscale":
         detect_fn = detect_cells_multiscale
         det_params = {
-            "threshold_rel": detection_params["threshold_rel"],
-            "min_distance": detection_params["min_distance"],
+            "threshold_rel": detection_params.get("threshold_rel", 0.02),
+            "min_distance": detection_params.get("min_distance", 5),
+            "downsample": detection_params.get("downsample", 1),
         }
     else:
-        detect_fn = detect_cells_3d
-        det_params = detection_params
+        raise ValueError(f"Unknown detection_method: {detection_method}")
 
     detections_by_frame = []
     for t in range(T):
@@ -494,14 +585,16 @@ def build_submission(results: list, output_path: str):
 def run_pipeline(
     input_dir: str = "/kaggle/input/biohub-cell-tracking-during-development/test",
     output_path: str = "submission.csv",
+    detection_method: str = "cc",
     sigma: float = 3.0,
     threshold_rel: float = 0.02,
+    percentile: float = 90.0,
+    downsample: int = 4,
     min_distance: int = 5,
     max_move: float = 15.0,
     division_threshold: float = 20.0,
     motion_weight: float = 0.5,
     frame_buffer: int = 2,
-    use_multiscale: bool = True,
     train_dir: str = None,
     target_ratio: float = 1.0,
 ) -> str:
@@ -514,14 +607,16 @@ def run_pipeline(
     Args:
         input_dir: Directory containing .zarr test datasets
         output_path: Path for output submission.csv
-        sigma: Gaussian sigma for cell detection (voxels)
-        threshold_rel: Detection threshold; overridden per dataset if train_dir set
+        detection_method: "cc" (connected components, fast) or "dog" (DoG peaks) or "multiscale"
+        sigma: Gaussian sigma for DoG detection (voxels)
+        threshold_rel: Detection threshold for DoG detection
+        percentile: Brightness percentile for cc detection (p90 = top 10%)
+        downsample: Downsampling factor (4 = 64x fewer voxels, recommended for cc)
         min_distance: Minimum distance between cells (voxels)
         max_move: Maximum cell movement between frames (µm)
         division_threshold: Max distance for division detection (µm)
         motion_weight: Weight of motion-compensated distance [0-1]
         frame_buffer: Frames before terminating lost tracks
-        use_multiscale: Whether to use multi-scale detection
         train_dir: Optional path to training data with .zarr/.geff pairs for calibration
         target_ratio: Ratio of predicted/expected nodes (1.0 = exact, >1 = over-predict)
 
@@ -542,14 +637,16 @@ def run_pipeline(
         sys.exit(1)
 
     print(f"Found {len(zarr_files)} datasets")
-    print(f"Detection: sigma={sigma}, thresh_rel={threshold_rel}, min_dist={min_distance}, "
-          f"multiscale={use_multiscale}")
+    print(f"Detection: method={detection_method}, downsample={downsample}, "
+          f"percentile={percentile}, sigma={sigma}, thresh_rel={threshold_rel}")
     print(f"Tracking: max_move={max_move}, div_thresh={division_threshold}, "
           f"motion_weight={motion_weight}, frame_buffer={frame_buffer}")
 
     detection_params = {
         "sigma": sigma,
         "threshold_rel": threshold_rel,
+        "percentile": percentile,
+        "downsample": downsample,
         "min_distance": min_distance,
     }
     tracking_params = {
@@ -559,18 +656,19 @@ def run_pipeline(
         "frame_buffer": frame_buffer,
     }
 
-    # Build calibration map if train_dir provided
+    # Build calibration map if train_dir provided (only for DoG methods)
     calibration = {}
-    if train_dir:
+    if train_dir and detection_method in ("dog", "multiscale"):
         train_path = Path(train_dir)
         for geff_path in sorted(train_path.glob("*.geff")):
             dataset_name = geff_path.name.replace(".geff", "")
             zarr_path = train_path / f"{dataset_name}.zarr"
             if zarr_path.exists():
+                use_ms = (detection_method == "multiscale")
                 calibration[dataset_name] = calibrate_threshold(
                     str(zarr_path), str(geff_path),
                     sigma=sigma, min_distance=min_distance,
-                    target_ratio=target_ratio, use_multiscale=use_multiscale,
+                    target_ratio=target_ratio, use_multiscale=use_ms,
                 )
 
     results = []
@@ -579,16 +677,14 @@ def run_pipeline(
     for zarr_path in tqdm(zarr_files, desc="Processing"):
         dataset_name = os.path.basename(str(zarr_path)).replace(".zarr", "")
 
-        # Use calibrated threshold if available
         det_params = detection_params.copy()
         if dataset_name in calibration:
             det_params["threshold_rel"] = calibration[dataset_name]
         elif calibration:
-            # Use average of calibrated thresholds
             det_params["threshold_rel"] = np.mean(list(calibration.values()))
 
         result = process_dataset(str(zarr_path), det_params,
-                                 tracking_params, use_multiscale)
+                                 tracking_params, detection_method)
         results.append(result)
         print(f"  {result['dataset']}: {len(result['nodes'])} nodes, "
               f"{len(result['edges'])} edges")
@@ -613,25 +709,37 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cell Tracking Pipeline")
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output", type=str, default="submission.csv")
+    parser.add_argument("--method", type=str, default="cc",
+                        choices=["cc", "dog", "multiscale"],
+                        help="Detection method: cc (connected components), dog (DoG peaks), multiscale")
     parser.add_argument("--sigma", type=float, default=3.0)
     parser.add_argument("--threshold-rel", type=float, default=0.02)
+    parser.add_argument("--percentile", type=float, default=90.0,
+                        help="Percentile for cc threshold (p90 = top 10%%)")
+    parser.add_argument("--downsample", type=int, default=4,
+                        help="Downsampling factor (4 recommended for cc)")
     parser.add_argument("--min-distance", type=int, default=5)
     parser.add_argument("--max-move", type=float, default=15.0)
     parser.add_argument("--division-threshold", type=float, default=20.0)
     parser.add_argument("--motion-weight", type=float, default=0.5)
     parser.add_argument("--frame-buffer", type=int, default=2)
-    parser.add_argument("--no-multiscale", action="store_true")
+    parser.add_argument("--train-dir", type=str, default=None)
+    parser.add_argument("--target-ratio", type=float, default=1.0)
     args = parser.parse_args()
 
     run_pipeline(
         input_dir=args.input_dir,
         output_path=args.output,
+        detection_method=args.method,
         sigma=args.sigma,
         threshold_rel=args.threshold_rel,
+        percentile=args.percentile,
+        downsample=args.downsample,
         min_distance=args.min_distance,
         max_move=args.max_move,
         division_threshold=args.division_threshold,
         motion_weight=args.motion_weight,
         frame_buffer=args.frame_buffer,
-        use_multiscale=not args.no_multiscale,
+        train_dir=args.train_dir,
+        target_ratio=args.target_ratio,
     )
