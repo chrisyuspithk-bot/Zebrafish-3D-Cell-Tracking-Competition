@@ -592,9 +592,9 @@ def run_pipeline(
     downsample: int = 4,
     min_distance: int = 5,
     max_move: float = 15.0,
-    division_threshold: float = 20.0,
-    motion_weight: float = 0.5,
-    frame_buffer: int = 2,
+    division_threshold: float = 15.0,
+    motion_weight: float = 0.0,
+    frame_buffer: int = 1,
     train_dir: str = None,
     target_ratio: float = 1.0,
 ) -> str:
@@ -720,9 +720,9 @@ if __name__ == "__main__":
                         help="Downsampling factor (4 recommended for cc)")
     parser.add_argument("--min-distance", type=int, default=5)
     parser.add_argument("--max-move", type=float, default=15.0)
-    parser.add_argument("--division-threshold", type=float, default=20.0)
-    parser.add_argument("--motion-weight", type=float, default=0.5)
-    parser.add_argument("--frame-buffer", type=int, default=2)
+    parser.add_argument("--division-threshold", type=float, default=15.0)
+    parser.add_argument("--motion-weight", type=float, default=0.0)
+    parser.add_argument("--frame-buffer", type=int, default=1)
     parser.add_argument("--train-dir", type=str, default=None)
     parser.add_argument("--target-ratio", type=float, default=1.0)
     args = parser.parse_args()
