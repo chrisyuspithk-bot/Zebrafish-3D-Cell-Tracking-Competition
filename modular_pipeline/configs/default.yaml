@@ -1,0 +1,75 @@
+# Biohub Cell Tracking Pipeline Configuration
+
+data:
+  train_dir: /kaggle/input/biohub-cell-tracking-during-development/train
+  test_dir: /kaggle/input/biohub-cell-tracking-during-development/test
+  # Voxel size in microns (anisotropic: Z spacing is typically larger than XY)
+  voxel_size: [2.0, 0.5, 0.5]  # Z, Y, X in microns
+  max_edge_distance_um: 7.0  # Max centroid distance for edge matching
+
+detection:
+  # DoG (Difference of Gaussians) blob detection
+  dog:
+    enabled: true
+    min_sigma: 1.5
+    max_sigma: 4.0
+    sigma_ratio: 1.6
+    threshold: 0.01
+    overlap: 0.5
+
+  # 3D UNet center heatmap detection
+  unet:
+    enabled: true
+    model_path: null  # Set to trained model path
+    in_channels: 1
+    out_channels: 1
+    features: [32, 64, 128, 256]
+    heatmap_threshold: 0.3
+    peak_min_distance: 4
+
+  # Hybrid fusion
+  fusion:
+    iou_threshold: 0.5    # NMS IoU for merging DoG + UNet detections
+    min_confidence: 0.1
+
+tracking:
+  # Graph construction
+  graph:
+    max_linking_distance: 50     # Max centroid distance (pixels) for candidate edges
+    max_gap_frames: 4            # Max gap to bridge
+    motion_model: constant_velocity
+    appearance_weight: 0.3
+    distance_weight: 0.7
+
+  # ILP optimization
+  ilp:
+    enabled: true
+    assignment_cost_scale: 1.0
+    appearance_gate: 0.5
+    division_cost: 100.0
+    gap_closing_cost: 50.0
+
+  # GNN linking (fallback / complementary)
+  gnn:
+    enabled: true
+    hidden_dim: 64
+    num_layers: 3
+    dropout: 0.1
+
+division:
+  enabled: true
+  # Look for sudden intensity drops followed by two nearby cells
+  min_cell_distance: 3      # Min centroid distance between daughters
+  max_cell_distance: 30     # Max centroid distance between daughters
+  temporal_window: 5        # Frames to look for division events
+
+postprocess:
+  gap_repair:
+    enabled: true
+    max_gap: 4               # Max frames to repair
+    max_displacement: 30     # Max displacement per gap step
+    min_track_length: 3      # Min frames for a valid track
+
+output:
+  submission_dir: /workspace/project/submissions
+  debug: false

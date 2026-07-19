@@ -98,10 +98,23 @@ See [metrics.md](https://github.com/royerlab/kaggle-cell-tracking-competition/bl
 
 | File | Description |
 |---|---|
-| `kaggle_solution.py` | Self-contained pipeline (main deliverable for Kaggle) |
+| `kaggle_solution.py` | Self-contained LAP pipeline (main deliverable for Kaggle) |
 | `detection.py` | Modular detection module |
 | `tracking.py` | Modular tracking module |
+| `modular_pipeline/` | **Alternative pipeline** — graph-based ILP + hybrid detection + gap repair |
 | `AGENTS.md` | Detailed project notes and metric analysis |
+
+### Alternative Pipeline (`modular_pipeline/`)
+
+A more extensible architecture for higher-ceiling experimentation:
+
+- **Hybrid detection**: DoG blobs + optional 3D UNet center heatmaps
+- **Global tracking**: Graph construction → ILP optimization (not greedy frame-to-frame)
+- **Gap repair**: Centroid interpolation across up to 4 missing frames
+- **Full metrics**: Edge Jaccard + Division Jaccard evaluation
+- **YAML config**: All hyperparameters in one file
+
+See [`modular_pipeline/README.md`](modular_pipeline/README.md) for details.
 
 ## Competition Constraints
 
